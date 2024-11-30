@@ -5,6 +5,74 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 
+import tensorflow as tf
+
+def compute_loss(model, loss_weights, generated_image, gram_style_features, content_features):
+    """
+    Compute the style, content, and total variation loss.
+
+    Args:
+    - model: The pre-trained VGG19 model.
+    - loss_weights: Tuple with weights for content and style losses.
+    - generated_image: The generated image to optimize.
+    - gram_style_features: Precomputed Gram matrices for style layers.
+    - content_features: Precomputed content features.
+
+    Returns:
+    - total_loss: The combined loss.
+    - (style_loss, content_loss, total_variation_loss): Individual components of the loss.
+    """
+    content_weight, style_weight = loss_weights
+    
+    # Extract features from the generated image
+    model_outputs = model(generated_image)
+    generated_content_features = model_outputs[:len(content_features)]
+    generated_style_features = model_outputs[len(content_features):]
+    
+    # Compute content loss
+    content_loss = tf.add_n(
+        [tf.reduce_mean(tf.square(content_feature - gen_content_feature))
+         for content_feature, gen_content_feature in zip(content_features, generated_content_features)]
+    )
+    
+    # Compute style loss
+    style_loss = tf.add_n(
+        [tf.reduce_mean(tf.square(gram_style_feature - compute_gram_matrix(gen_style_feature)))
+         for gram_style_feature, gen_style_feature in zip(gram_style_features, generated_style_features)]
+    )
+    
+    # Scale losses
+    content_loss *= content_weight
+    style_loss *= style_weight
+
+    # Total variation loss for smoothness
+    total_variation_loss = tf.image.total_variation(generated_image)
+    
+    # Combine all losses
+    total_loss = content_loss + style_loss + total_variation_loss
+    return total_loss, (style_loss, content_loss, total_variation_loss)
+
+
+def compute_gram_matrix(input_tensor):
+    """
+    Compute the Gram matrix for a given input tensor.
+
+    Args:
+    - input_tensor: A tensor from the style layers.
+
+    Returns:
+    - gram_matrix: The Gram matrix for the input tensor.
+    """
+    # Flatten the feature map along the spatial dimensions
+    channels = int(input_tensor.shape[-1])
+    a = tf.reshape(input_tensor, [-1, channels])
+    n = tf.shape(a)[0]
+    
+    # Compute the Gram matrix
+    gram_matrix = tf.matmul(a, a, transpose_a=True)
+    return gram_matrix / tf.cast(n, tf.float32)
+
+
 def load_and_process_image(image_path, target_size=(512, 512)):
     img = Image.open(image_path)
     img = img.resize(target_size)
