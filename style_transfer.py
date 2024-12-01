@@ -1,162 +1,143 @@
 import tensorflow as tf
-from tensorflow.keras.applications import VGG19
+from tensorflow.keras.applications import vgg19
 from tensorflow.keras.models import Model
 import numpy as np
-from PIL import Image
-import matplotlib.pyplot as plt
+import PIL.Image
+import os
 
-import tensorflow as tf
-
-def compute_loss(model, loss_weights, generated_image, gram_style_features, content_features):
-    """
-    Compute the style, content, and total variation loss.
-
-    Args:
-    - model: The pre-trained VGG19 model.
-    - loss_weights: Tuple with weights for content and style losses.
-    - generated_image: The generated image to optimize.
-    - gram_style_features: Precomputed Gram matrices for style layers.
-    - content_features: Precomputed content features.
-
-    Returns:
-    - total_loss: The combined loss.
-    - (style_loss, content_loss, total_variation_loss): Individual components of the loss.
-    """
-    content_weight, style_weight = loss_weights
-    
-    # Extract features from the generated image
-    model_outputs = model(generated_image)
-    generated_content_features = model_outputs[:len(content_features)]
-    generated_style_features = model_outputs[len(content_features):]
-    
-    # Compute content loss
-    content_loss = tf.add_n(
-        [tf.reduce_mean(tf.square(content_feature - gen_content_feature))
-         for content_feature, gen_content_feature in zip(content_features, generated_content_features)]
-    )
-    
-    # Compute style loss
-    style_loss = tf.add_n(
-        [tf.reduce_mean(tf.square(gram_style_feature - compute_gram_matrix(gen_style_feature)))
-         for gram_style_feature, gen_style_feature in zip(gram_style_features, generated_style_features)]
-    )
-    
-    # Scale losses
-    content_loss *= content_weight
-    style_loss *= style_weight
-
-    # Total variation loss for smoothness
-    total_variation_loss = tf.image.total_variation(generated_image)
-    
-    # Combine all losses
-    total_loss = content_loss + style_loss + total_variation_loss
-    return total_loss, (style_loss, content_loss, total_variation_loss)
-
-
-def compute_gram_matrix(input_tensor):
-    """
-    Compute the Gram matrix for a given input tensor.
-
-    Args:
-    - input_tensor: A tensor from the style layers.
-
-    Returns:
-    - gram_matrix: The Gram matrix for the input tensor.
-    """
-    # Flatten the feature map along the spatial dimensions
-    channels = int(input_tensor.shape[-1])
-    a = tf.reshape(input_tensor, [-1, channels])
-    n = tf.shape(a)[0]
-    
-    # Compute the Gram matrix
-    gram_matrix = tf.matmul(a, a, transpose_a=True)
-    return gram_matrix / tf.cast(n, tf.float32)
-
-
+# --- Helper Functions ---
 def load_and_process_image(image_path, target_size=(512, 512)):
-    img = Image.open(image_path)
-    img = img.resize(target_size)
-    img = tf.keras.preprocessing.image.img_to_array(img)
-    img = np.expand_dims(img, axis=0)
-    img = tf.keras.applications.vgg19.preprocess_input(img)
-    return img
+    """Load and preprocess an image for the VGG19 model."""
+    img = tf.keras.utils.load_img(image_path, target_size=target_size)
+    img = tf.keras.utils.img_to_array(img)
+    img = np.expand_dims(img, axis=0)  # Add batch dimension
+    img = vgg19.preprocess_input(img)  # VGG19 preprocessing
+    return tf.convert_to_tensor(img)
 
-def deprocess_image(processed_image):
-    x = processed_image.copy()
-    if len(x.shape) == 4:
-        x = np.squeeze(x, axis=0)
+def deprocess_image(processed_img):
+    """De-process an image after style transfer."""
+    x = processed_img.copy()
     x[:, :, 0] += 103.939
     x[:, :, 1] += 116.779
     x[:, :, 2] += 123.68
     x = x[:, :, ::-1]  # Convert BGR to RGB
-    x = np.clip(x, 0, 255).astype('uint8')
+    x = np.clip(x, 0, 255).astype("uint8")
     return x
 
+def compute_gram_matrix(tensor):
+    """Compute the Gram matrix for a given tensor."""
+    channels = int(tensor.shape[-1])
+    vectorized = tf.reshape(tensor, [-1, channels])
+    gram_matrix = tf.matmul(vectorized, vectorized, transpose_a=True)
+    return gram_matrix / tf.cast(tf.shape(vectorized)[0], tf.float32)
 
-def content_loss(base_content, target):
-    return tf.reduce_mean(tf.square(base_content - target))
+# --- Loss Functions ---
+def compute_loss(model, loss_weights, generated_image, gram_style_features, content_features):
+    """Compute total loss for style transfer."""
+    content_weight, style_weight = loss_weights
+    model_outputs = model(generated_image)
+    generated_content_features = model_outputs[:len(content_features)]
+    generated_style_features = model_outputs[len(content_features):]
+    
+    # Content loss
+    content_loss = tf.add_n([
+        tf.reduce_mean(tf.square(content_feature - gen_content_feature))
+        for content_feature, gen_content_feature in zip(content_features, generated_content_features)
+    ])
+    content_loss *= content_weight
 
-def style_loss(base_style, gram_target):
-    height, width, channels = base_style.get_shape().as_list()
-    gram_style = gram_matrix(base_style)
-    return tf.reduce_mean(tf.square(gram_style - gram_target)) / (4.0 * (channels**2) * (width * height)**2)
+    # Style loss
+    style_loss = tf.add_n([
+        tf.reduce_mean(tf.square(gram_style_feature - compute_gram_matrix(gen_style_feature)))
+        for gram_style_feature, gen_style_feature in zip(gram_style_features, generated_style_features)
+    ])
+    style_loss *= style_weight
 
-def gram_matrix(input_tensor):
-    channels = int(input_tensor.shape[-1])
-    vectorized = tf.reshape(input_tensor, [-1, channels])
-    gram = tf.matmul(tf.transpose(vectorized), vectorized)
-    return gram
+    # Total variation loss (smoothness)
+    total_variation_loss = tf.image.total_variation(generated_image)
 
+    # Combine losses
+    total_loss = content_loss + style_loss + total_variation_loss
+    return total_loss, (style_loss, content_loss, total_variation_loss)
 
-style_layers = [
-    'block1_conv1', 'block2_conv1', 'block3_conv1', 'block4_conv1', 'block5_conv1'
-]
-content_layers = ['block5_conv2']
-all_layers = style_layers + content_layers
-
+# --- Load VGG19 Model ---
 def get_model():
-    vgg = VGG19(include_top=False, weights='imagenet')
+    """Load the VGG19 model and return intermediate layers for style and content."""
+    vgg = vgg19.VGG19(weights="imagenet", include_top=False)
     vgg.trainable = False
-    outputs = [vgg.get_layer(name).output for name in all_layers]
-    model = Model([vgg.input], outputs)
-    return model
 
+    # Content layer
+    content_layers = ["block5_conv2"]
+    # Style layers
+    style_layers = [
+        "block1_conv1", "block2_conv1",
+        "block3_conv1", "block4_conv1", "block5_conv1"
+    ]
+    selected_layers = style_layers + content_layers
+    outputs = [vgg.get_layer(name).output for name in selected_layers]
+    return Model([vgg.input], outputs), len(style_layers)
 
-def run_style_transfer(content_path, style_path, num_iterations=1000, style_weight=1e-2, content_weight=1e4):
-    model = get_model()
-    for layer in model.layers:
-        layer.trainable = False
-
+# --- Main Function for Style Transfer ---
+def run_style_transfer(content_path, style_path, iterations=1000, content_weight=1e4, style_weight=1e-2):
+    """Run the style transfer process."""
+    # Load and preprocess images
     content_image = load_and_process_image(content_path)
     style_image = load_and_process_image(style_path)
-    generated_image = tf.Variable(content_image, dtype=tf.float32)
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.02)
-    loss_weights = (style_weight, content_weight)
+    # Load the VGG19 model
+    model, num_style_layers = get_model()
 
     # Extract features
-    style_features = model(style_image)[:len(style_layers)]
-    content_features = model(content_image)[len(style_layers):]
+    content_features = model(content_image)[-1:]  # Only content layers
+    style_features = model(style_image)[:num_style_layers]  # Only style layers
+    gram_style_features = [compute_gram_matrix(feature) for feature in style_features]
 
-    gram_style_features = [gram_matrix(feature) for feature in style_features]
+    # Initialize the generated image
+    generated_image = tf.Variable(content_image, trainable=True)
 
-    for i in range(num_iterations):
+    # Define optimizer
+    optimizer = tf.optimizers.Adam(learning_rate=5.0)
+
+    # Loss weights
+    loss_weights = (content_weight, style_weight)
+
+    # Optimization loop
+    @tf.function
+    def train_step():
         with tf.GradientTape() as tape:
-            all_loss = compute_loss(model, loss_weights, generated_image, gram_style_features, content_features)
-        total_loss = all_loss[0]
-        grads = tape.gradient(total_loss, generated_image)
-        optimizer.apply_gradients([(grads, generated_image)])
+            total_loss, _ = compute_loss(
+                model, loss_weights, generated_image,
+                gram_style_features, content_features
+            )
+        gradients = tape.gradient(total_loss, generated_image)
+        optimizer.apply_gradients([(gradients, generated_image)])
+        return total_loss
 
+    for i in range(iterations):
+        total_loss = train_step()
+
+        # Print progress every 100 iterations
         if i % 100 == 0:
-            print(f"Iteration {i}, Loss: {total_loss.numpy()}")
+            print(f"Iteration {i}/{iterations}, Loss: {total_loss.numpy()}")
 
-    final_img = deprocess_image(generated_image.numpy())
+    # Deprocess the final image
+    final_img = deprocess_image(generated_image.numpy()[0])
     return final_img
 
+# --- Save Output ---
+def save_image(output_image, output_path):
+    """Save the generated image to a file."""
+    output_image = PIL.Image.fromarray(output_image)
+    output_image.save(output_path)
+
+# --- Main Execution ---
 if __name__ == "__main__":
+    # Paths to content and style images
     content_path = "images/content.jpg"
     style_path = "images/style.jpg"
-    output = run_style_transfer(content_path, style_path)
-    plt.imshow(output)
-    plt.axis('off')
-    plt.show()
+    output_path = "images/output.jpg"
+
+    # Run style transfer
+    final_image = run_style_transfer(content_path, style_path, iterations=1000)
+    save_image(final_image, output_path)
+    print("Style transfer complete. Output saved at:", output_path)
